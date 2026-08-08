@@ -7,6 +7,7 @@ import os
 from urllib.parse import quote_plus, urlparse
 import ipaddress
 from dotenv import load_dotenv
+from yt_dlp import YoutubeDL
 
 
 app = Flask(__name__)
@@ -296,9 +297,46 @@ def extract_youtube_data(url):
             primary["source"] = "piped+invidious"
             return primary, None
 
-    detail = primary_error or fallback_error
+    # Final keyless fallback: yt-dlp handles YouTube's current signed URLs
+    # locally and does not depend on an API key or a public instance.
+    try:
+        local_result, local_error = extract_youtube_with_ytdlp(url)
+        if local_result:
+            return local_result, None
+    except Exception as error:
+        logger.warning("yt-dlp fallback error: %s", error)
+        local_error = str(error)
+
+    detail = primary_error or fallback_error or local_error
     logger.warning("All YouTube providers failed: %s", detail)
     return None, f"Unable to download video or audio from YouTube. Providers unavailable ({detail})."
+
+
+def extract_youtube_with_ytdlp(url):
+    """Extract signed video/audio URLs without an API key."""
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        return None, "Invalid YouTube URL"
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    title = info.get("title", f"YouTube Video {video_id}")
+    thumbnail = info.get("thumbnail") or f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+    media = []
+    for format_spec, kind, extension in (("best[ext=mp4]/best", "video", "mp4"),
+                                         ("bestaudio[ext=m4a]/bestaudio", "audio", "m4a")):
+        selected = next((f for f in info.get("formats", []) if f.get("url") and
+                         ((kind == "audio" and f.get("vcodec") == "none") or
+                          (kind == "video" and f.get("vcodec") != "none" and f.get("acodec") != "none"))), None)
+        if not selected:
+            continue
+        filename = f"{title}.{extension}" if kind == "video" else f"{title}_audio.{extension}"
+        stream_url = selected["url"]
+        media.append({"filename": filename, "size": "Best Quality", "thumbnail": thumbnail,
+                      "dlink": stream_url, "stream_url": f"/api/stream?url={quote_plus(stream_url)}" if kind == "video" else None,
+                      "proxy_download": f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
+                      "type": kind, "quality": "Video" if kind == "video" else "Audio"})
+    return ({"media": media, "title": title, "source": "yt-dlp"}, None) if media else (None, "yt-dlp returned no streams")
 
 
 def is_safe_remote_url(value):
