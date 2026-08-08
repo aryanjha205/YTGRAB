@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 COBALT_API_URL = os.getenv("COBALT_API_URL", "https://api.cobalt.tools").rstrip("/")
 COBALT_API_TOKEN = os.getenv("COBALT_API_TOKEN")
 INVIDIOUS_API_URL = os.getenv(
-    "INVIDIOUS_API_URL", "https://yewtu.be"
+    "INVIDIOUS_API_URL", "https://inv.nadeko.net"
 ).rstrip("/")
-PIPED_API_URL = os.getenv("PIPED_API_URL", "https://pipedapi.kavin.rocks").rstrip("/")
+INVIDIOUS_FALLBACK_URL = os.getenv(
+    "INVIDIOUS_FALLBACK_URL", "https://yewtu.be"
+).rstrip("/")
 REQUEST_TIMEOUT = (5, 30)
 
 # --- PWA Static Files Serving ---
@@ -153,7 +155,7 @@ def extract_youtube_with_cobalt(url):
         return {'media': media_list, 'title': title, 'source': 'youtube'}, None
     return None, "Cobalt extraction failed"
 
-def extract_youtube_with_invidious(url):
+def extract_youtube_with_invidious(url, api_base=None):
     """Fallback third-party API when the configured Cobalt API is unavailable."""
     video_id = extract_youtube_id(url)
     if not video_id:
@@ -161,7 +163,7 @@ def extract_youtube_with_invidious(url):
         
     try:
         logger.info("Trying Invidious fallback for video: %s", video_id)
-        api_url = f"{INVIDIOUS_API_URL}/api/v1/videos/{video_id}"
+        api_url = f"{(api_base or INVIDIOUS_API_URL)}/api/v1/videos/{video_id}"
         resp = requests.get(api_url, timeout=REQUEST_TIMEOUT)
         if not resp.ok:
             return None, f"Invidious returned HTTP {resp.status_code}"
@@ -269,9 +271,9 @@ def extract_youtube_data(url):
     # type. This matters because providers can succeed for video but fail for
     # audio (or vice versa) for age-restricted/region-limited videos.
     try:
-        primary, primary_error = extract_youtube_with_cobalt(url)
+        primary, primary_error = extract_youtube_with_invidious(url)
     except Exception as error:
-        logger.warning("Cobalt provider error: %s", error)
+        logger.warning("Piped provider error: %s", error)
         primary, primary_error = None, str(error)
     if primary and all(item.get("type") in {"video", "audio"} for item in primary.get("media", [])):
         types = {item.get("type") for item in primary.get("media", [])}
@@ -279,9 +281,9 @@ def extract_youtube_data(url):
             return primary, None
 
     try:
-        fallback, fallback_error = extract_youtube_with_piped(url)
+        fallback, fallback_error = extract_youtube_with_invidious(url, INVIDIOUS_FALLBACK_URL)
     except Exception as error:
-        logger.warning("Piped provider error: %s", error)
+        logger.warning("Invidious provider error: %s", error)
         fallback, fallback_error = None, str(error)
     if fallback:
         if not primary:
@@ -291,7 +293,7 @@ def extract_youtube_data(url):
             item for item in fallback.get("media", []) if item.get("type") not in existing_types
         )
         if primary.get("media"):
-            primary["source"] = "cobalt+piped"
+            primary["source"] = "piped+invidious"
             return primary, None
 
     detail = primary_error or fallback_error
