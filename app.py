@@ -3,14 +3,27 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 import requests
 import re
 import logging
-import time
 import os
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
+import ipaddress
+from dotenv import load_dotenv
 
 
 app = Flask(__name__)
+load_dotenv()
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Third-party provider configuration.  Cobalt is the primary provider because it
+# can return both a muxed video and an MP3 audio download.  An Invidious API is
+# used only if Cobalt is unavailable.  Override these values in the deployment
+# environment; never put provider credentials in the browser.
+COBALT_API_URL = os.getenv("COBALT_API_URL", "https://api.cobalt.tools").rstrip("/")
+COBALT_API_TOKEN = os.getenv("COBALT_API_TOKEN")
+INVIDIOUS_API_URL = os.getenv(
+    "INVIDIOUS_API_URL", "https://yewtu.be"
+).rstrip("/")
+REQUEST_TIMEOUT = (5, 30)
 
 # --- PWA Static Files Serving ---
 @app.route('/manifest.json')
@@ -36,16 +49,12 @@ def get_file_size(url):
 def validate_youtube_url(url):
     """Validate YouTube URL."""
     try:
-        u = url.strip().lower()
-        patterns = [
-            r'youtube\.com/watch\?v=[a-zA-Z0-9_-]+',
-            r'youtu\.be/[a-zA-Z0-9_-]+',
-            r'youtube\.com/shorts/[a-zA-Z0-9_-]+',
-            r'youtube\.com/embed/[a-zA-Z0-9_-]+',
-            r'youtube\.com/v/[a-zA-Z0-9_-]+',
-        ]
-        return any(re.search(p, u) for p in patterns)
-    except:
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower()
+        if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+            return False
+        return extract_youtube_id(url) is not None
+    except (TypeError, ValueError):
         return False
 
 def extract_youtube_id(url):
@@ -63,90 +72,57 @@ def extract_youtube_id(url):
         pass
     return None
 
+def get_youtube_title(url, default):
+    """Fetch a display title without making extraction depend on oEmbed."""
+    try:
+        response = requests.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=(5, 8),
+        )
+        if response.ok:
+            return response.json().get("title", default)
+    except requests.RequestException as error:
+        logger.info("YouTube oEmbed title lookup failed: %s", error)
+    return default
+
+
+def cobalt_request(payload):
+    """Request the configured Cobalt provider and return a ready download URL."""
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if COBALT_API_TOKEN:
+        headers["Authorization"] = f"Api-Key {COBALT_API_TOKEN}"
+
+    # Current Cobalt servers use the root endpoint.  /api/json retains
+    # compatibility with older self-hosted Cobalt deployments.
+    for endpoint in (COBALT_API_URL, f"{COBALT_API_URL}/api/json"):
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            if not response.ok:
+                logger.info("Cobalt returned %s from %s", response.status_code, endpoint)
+                continue
+            data = response.json()
+            # Cobalt-compatible servers may return a direct redirect, a
+            # tunneled URL, or a local/stream URL depending on configuration.
+            if data.get("status") in {"redirect", "tunnel", "local", "stream"} and data.get("url"):
+                return data["url"]
+            logger.info("Cobalt returned no downloadable result: %s", data.get("status"))
+        except (requests.RequestException, ValueError) as error:
+            logger.warning("Cobalt request failed: %s", error)
+    return None
+
+
 def extract_youtube_with_cobalt(url):
-    """Try to extract YouTube video using Cobalt API instances."""
-    instances = [
-        "https://api.cobalt.tools",
-        "https://cobalt.api.rylor.org",
-        "https://cobalt.k6.cz",
-        "https://cobalt-api.lunes.host",
-        "https://co.wuk.sh"
-    ]
-    
+    """Primary third-party API: Cobalt returns video and MP3 audio downloads."""
     video_id = extract_youtube_id(url)
     if not video_id:
         return None, "Invalid YouTube URL"
-        
-    title = f"YouTube Video {video_id}"
-    try:
-        oembed_url = f"https://www.youtube.com/oembed?url={quote_plus(url)}&format=json"
-        oresp = requests.get(oembed_url, timeout=5)
-        if oresp.ok:
-            title = oresp.json().get('title', title)
-    except Exception as e:
-        logger.warning(f"Failed to fetch YouTube oembed title: {e}")
-        
+    title = get_youtube_title(url, f"YouTube Video {video_id}")
+    video_url = cobalt_request({"url": url, "videoQuality": "1080", "filenameStyle": "basic"})
+    audio_url = cobalt_request({
+        "url": url, "downloadMode": "audio", "audioFormat": "mp3", "filenameStyle": "basic"
+    })
     media_list = []
-    
-    # Try video download
-    video_url = None
-    for instance in instances:
-        try:
-            logger.info(f"Trying Cobalt video download on instance: {instance}")
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            payload = {
-                "url": url,
-                "videoQuality": "1080",
-                "filenameStyle": "basic"
-            }
-            resp = requests.post(f"{instance}/api/json", json=payload, headers=headers, timeout=8)
-            if resp.status_code == 404:
-                resp = requests.post(instance, json=payload, headers=headers, timeout=8)
-            
-            if resp.ok:
-                data = resp.json()
-                if data.get("status") in ["redirect", "tunnel"]:
-                    video_url = data.get("url")
-                    logger.info(f"Cobalt video success on {instance}")
-                    break
-        except Exception as e:
-            logger.warning(f"Cobalt video instance {instance} failed: {e}")
-            continue
-            
-    # Try audio download
-    audio_url = None
-    for instance in instances:
-        try:
-            logger.info(f"Trying Cobalt audio download on instance: {instance}")
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            payload = {
-                "url": url,
-                "downloadMode": "audio",
-                "audioFormat": "mp3",
-                "filenameStyle": "basic"
-            }
-            resp = requests.post(f"{instance}/api/json", json=payload, headers=headers, timeout=8)
-            if resp.status_code == 404:
-                resp = requests.post(instance, json=payload, headers=headers, timeout=8)
-                
-            if resp.ok:
-                data = resp.json()
-                if data.get("status") in ["redirect", "tunnel"]:
-                    audio_url = data.get("url")
-                    logger.info(f"Cobalt audio success on {instance}")
-                    break
-        except Exception as e:
-            logger.warning(f"Cobalt audio instance {instance} failed: {e}")
-            continue
-            
     if video_url:
         filename = f"{title}.mp4"
         media_list.append({
@@ -177,155 +153,120 @@ def extract_youtube_with_cobalt(url):
     return None, "Cobalt extraction failed"
 
 def extract_youtube_with_invidious(url):
-    """Fallback to public Invidious API instances."""
+    """Fallback third-party API when the configured Cobalt API is unavailable."""
     video_id = extract_youtube_id(url)
     if not video_id:
         return None, "Invalid YouTube URL"
         
-    invidious_instances = [
-        "https://yewtu.be",
-        "https://invidious.nerdvpn.de",
-        "https://invidious.flokinet.to",
-        "https://invidious.projectsegfau.lt",
-        "https://inv.tux.im",
-        "https://invidious.io"
-    ]
-    
-    for instance in invidious_instances:
-        try:
-            logger.info(f"Trying Invidious instance: {instance} for video: {video_id}")
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            resp = requests.get(api_url, timeout=8)
-            if resp.ok:
-                data = resp.json()
-                title = data.get("title", f"YouTube Video {video_id}")
-                media_list = []
-                
-                # Extract format streams (combined video + audio)
-                streams = data.get("formatStreams", [])
-                for idx, stream in enumerate(streams):
-                    quality = stream.get("quality", "medium")
-                    stream_url = stream.get("url")
-                    mime_type = stream.get("type", "video/mp4")
-                    ext = "mp4" if "mp4" in mime_type else "webm"
-                    filename = f"{title}_{quality}.{ext}"
-                    
-                    media_list.append({
-                        'filename': filename,
-                        'size': stream.get("size", "N/A"),
-                        'thumbnail': f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
-                        'dlink': stream_url,
-                        'stream_url': f"/api/stream?url={quote_plus(stream_url)}",
-                        'proxy_download': f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
-                        'type': 'video',
-                        'quality': f"Video ({quality})"
-                    })
-                    
-                # Extract adaptive formats for audio (audio only)
-                adaptive = data.get("adaptiveFormats", [])
-                audio_added = False
-                for stream in adaptive:
-                    if stream.get("type", "").startswith("audio/") and not audio_added:
-                        stream_url = stream.get("url")
-                        container = stream.get("container", "m4a")
-                        filename = f"{title}_audio.{container}"
-                        
-                        media_list.append({
-                            'filename': filename,
-                            'size': 'Audio Only',
-                            'thumbnail': f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
-                            'dlink': stream_url,
-                            'stream_url': None,
-                            'proxy_download': f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
-                            'type': 'audio',
-                            'quality': f"Audio ({container.upper()})"
-                        })
-                        audio_added = True
-                        
-                if media_list:
-                    logger.info(f"Invidious success on {instance}")
-                    return {'media': media_list, 'title': title, 'source': 'youtube'}, None
-        except Exception as e:
-            logger.warning(f"Invidious instance {instance} failed: {e}")
-            continue
-            
-    return None, "Invidious extraction failed"
-
-def extract_youtube_with_loader_to(url):
-    """Fallback using Loader.to AJAX API."""
     try:
-        video_id = extract_youtube_id(url)
-        if not video_id:
-            return None, "Invalid YouTube URL"
-        
-        api_url = "https://api.loader.to/api/ajax/download.php"
-        params = {
-            "url": url,
-            "format": "720",
-            "button": "1"
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://loader.to/"
-        }
-        
-        logger.info(f"Trying Loader.to for video: {video_id}")
-        resp = requests.get(api_url, params=params, headers=headers, timeout=8)
-        if resp.ok:
-            data = resp.json()
-            job_id = data.get("id")
-            if not job_id:
-                return None, "No job ID returned from Loader.to"
-            
-            # Poll progress up to 5 times (10 seconds total)
-            progress_url = "https://api.loader.to/api/ajax/progress.php"
-            for _ in range(5):
-                time.sleep(2)
-                prog_resp = requests.get(progress_url, params={"id": job_id}, headers=headers, timeout=5)
-                if prog_resp.ok:
-                    prog_data = prog_resp.json()
-                    if prog_data.get("success") == 1 or prog_data.get("progress") >= 1000:
-                        download_url = prog_data.get("download_url")
-                        if download_url:
-                            logger.info("Loader.to success")
-                            title = prog_data.get("title", f"YouTube Video {video_id}")
-                            filename = f"{title}.mp4"
-                            return {
-                                'media': [{
-                                    'filename': filename,
-                                    'size': '720p HD',
-                                    'thumbnail': f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
-                                    'dlink': download_url,
-                                    'stream_url': f"/api/stream?url={quote_plus(download_url)}",
-                                    'proxy_download': f"/api/download?url={quote_plus(download_url)}&filename={quote_plus(filename)}",
-                                    'type': 'video',
-                                    'quality': 'Video (720p)'
-                                }]
-                            }, None
-                    elif prog_data.get("success") == 0 and prog_data.get("progress") == 0:
-                        break
-    except Exception as e:
-        logger.warning(f"Loader.to failed: {e}")
-        
-    return None, "Loader.to extraction failed"
+        logger.info("Trying Invidious fallback for video: %s", video_id)
+        api_url = f"{INVIDIOUS_API_URL}/api/v1/videos/{video_id}"
+        resp = requests.get(api_url, timeout=REQUEST_TIMEOUT)
+        if not resp.ok:
+            return None, f"Invidious returned HTTP {resp.status_code}"
+
+        data = resp.json()
+        title = data.get("title", f"YouTube Video {video_id}")
+        media_list = []
+
+        # formatStreams contain muxed video/audio files.
+        for stream in data.get("formatStreams", []):
+            stream_url = stream.get("url")
+            if not stream_url:
+                continue
+            quality = stream.get("quality", "medium")
+            mime_type = stream.get("type", "video/mp4")
+            ext = "mp4" if "mp4" in mime_type else "webm"
+            filename = f"{title}_{quality}.{ext}"
+            media_list.append({
+                'filename': filename,
+                'size': stream.get("size", "N/A"),
+                'thumbnail': f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
+                'dlink': stream_url,
+                'stream_url': f"/api/stream?url={quote_plus(stream_url)}",
+                'proxy_download': f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
+                'type': 'video',
+                'quality': f"Video ({quality})"
+            })
+
+        # Return one audio-only format as an audio fallback.
+        for stream in data.get("adaptiveFormats", []):
+            stream_url = stream.get("url")
+            if not stream_url or not stream.get("type", "").startswith("audio/"):
+                continue
+            container = stream.get("container", "m4a")
+            filename = f"{title}_audio.{container}"
+            media_list.append({
+                'filename': filename,
+                'size': 'Audio Only',
+                'thumbnail': f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
+                'dlink': stream_url,
+                'stream_url': None,
+                'proxy_download': f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
+                'type': 'audio',
+                'quality': f"Audio ({container.upper()})"
+            })
+            break
+
+        if media_list:
+            logger.info("Invidious fallback succeeded")
+            return {'media': media_list, 'title': title, 'source': 'invidious'}, None
+    except (requests.RequestException, ValueError) as error:
+        logger.warning("Invidious fallback failed: %s", error)
+    return None, "Invidious extraction failed"
 
 def extract_youtube_data(url):
     """Extract YouTube video with fallback strategy."""
-    methods = [
-        extract_youtube_with_cobalt,
-        extract_youtube_with_invidious,
-        extract_youtube_with_loader_to
-    ]
-    for method in methods:
+    # Ask the primary first, then use the fallback to fill any missing media
+    # type. This matters because providers can succeed for video but fail for
+    # audio (or vice versa) for age-restricted/region-limited videos.
+    try:
+        primary, primary_error = extract_youtube_with_cobalt(url)
+    except Exception as error:
+        logger.warning("Cobalt provider error: %s", error)
+        primary, primary_error = None, str(error)
+    if primary and all(item.get("type") in {"video", "audio"} for item in primary.get("media", [])):
+        types = {item.get("type") for item in primary.get("media", [])}
+        if types == {"video", "audio"}:
+            return primary, None
+
+    try:
+        fallback, fallback_error = extract_youtube_with_invidious(url)
+    except Exception as error:
+        logger.warning("Invidious provider error: %s", error)
+        fallback, fallback_error = None, str(error)
+    if fallback:
+        if not primary:
+            return fallback, None
+        existing_types = {item.get("type") for item in primary.get("media", [])}
+        primary["media"].extend(
+            item for item in fallback.get("media", []) if item.get("type") not in existing_types
+        )
+        if primary.get("media"):
+            primary["source"] = "cobalt+invidious"
+            return primary, None
+
+    detail = primary_error or fallback_error
+    logger.warning("All YouTube providers failed: %s", detail)
+    return None, "Unable to download video or audio from YouTube. Try another video link or check back later."
+
+
+def is_safe_remote_url(value):
+    """Allow provider/CDN URLs while rejecting local-network SSRF targets."""
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        host = parsed.hostname
         try:
-            result, error = method(url)
-            if result:
-                return result, None
-        except Exception as e:
-            logger.warning(f"{method.__name__} error: {e}")
-            continue
-            
-    return None, "Unable to download video from YouTube. Try another video link or check back later."
+            address = ipaddress.ip_address(host)
+            return not (address.is_private or address.is_loopback or address.is_link_local)
+        except ValueError:
+            # Hostnames are resolved by the provider/CDN; reject obvious local
+            # names but allow normal public domains.
+            return host.lower() not in {"localhost", "localhost.localdomain"}
+    except (TypeError, ValueError):
+        return False
 
 @app.route('/')
 def index():
@@ -362,6 +303,8 @@ def proxy_stream():
     remote = request.args.get('url')
     if not remote:
         return jsonify({'error': 'Missing url'}), 400
+    if not is_safe_remote_url(remote):
+        return jsonify({'error': 'Invalid media URL'}), 400
     try:
         resp = requests.get(remote, stream=True, timeout=25, headers={
             'User-Agent': 'Mozilla/5.0',
@@ -381,6 +324,8 @@ def proxy_download():
     filename = request.args.get('filename', 'media')
     if not remote:
         return jsonify({'error': 'Missing url'}), 400
+    if not is_safe_remote_url(remote):
+        return jsonify({'error': 'Invalid media URL'}), 400
     try:
         resp = requests.get(remote, stream=True, timeout=25, headers={
             'User-Agent': 'Mozilla/5.0',
