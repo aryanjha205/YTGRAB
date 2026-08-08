@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YTGrab - Free YouTube Video & MP3 Downloader</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='icon-192.png') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+    <meta name="theme-color" content="#5c67ff">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="manifest" href="/manifest.json">
+</head>
+
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <nav>
+        <div class="logo">YT<span>Grab</span></div>
+        <button id="theme-toggle" aria-label="Toggle Theme">
+            <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="5" />
+                <line x1="12" y1="1" x2="12" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="23" />
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                <line x1="1" y1="12" x2="3" y2="12" />
+                <line x1="21" y1="12" x2="23" y2="12" />
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+            </svg>
+            <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+        </button>
+    </nav>
+
+    <main>
+        <section class="hero">
+            <h1>Download YouTube Videos <span>Instantly & Free</span></h1>
+            <p>Paste your YouTube link below to download videos & MP3 audio instantly.</p>
+
+            <div class="input-container glass">
+                <input type="text" id="terabox-url" placeholder="Paste YouTube video link..." autocomplete="off">
+                <button id="extract-btn">
+                    <span class="btn-text">Download</span>
+                    <span class="spinner hidden"></span>
+                </button>
+            </div>
+
+            <div id="error-message" class="error-toast hidden"></div>
+        </section>
+
+        <section id="result-section" class="hidden">
+            <div class="result-card glass">
+                <div id="media-container"></div>
+            </div>
+        </section>
+
+    </main>
+
+    <div class="sidebar-socials">
+        <a href="https://www.youtube.com/@Fun_n_Fact_Factory" target="_blank" rel="noopener noreferrer" class="sidebar-link yt-link" title="YouTube">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#FF0000"><path d="M23.498 6.163c-.272-1.016-1.047-1.816-2.04-2.09C19.648 3.5 12 3.5 12 3.5s-7.648 0-9.457.573C.55 4.347.16 5.147.16 6.163.16 8.243.16 12 .16 12s0 3.757.573 5.837c.272 1.016 1.047 1.816 2.04 2.09 1.809.573 9.457.573 9.457.573s7.648 0 9.457-.573c.993-.274 1.768-1.074 2.04-2.09.573-2.08.573-5.837.573-5.837s0-3.757-.573-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+            <span class="link-text">YouTube</span>
+        </a>
+        <a href="https://instagram.com/atharva_jha2015" target="_blank" rel="noopener noreferrer" class="sidebar-link ig-link" title="Instagram">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="url(#ig-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <defs>
+                    <linearGradient id="ig-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+                        <stop offset="0%" stop-color="#fdf497" />
+                        <stop offset="5%" stop-color="#fdf497" />
+                        <stop offset="45%" stop-color="#fd5949" />
+                        <stop offset="60%" stop-color="#d6249f" />
+                        <stop offset="90%" stop-color="#285AEB" />
+                    </linearGradient>
+                </defs>
+                <rect x="2" y="2" width="20" height="20" rx="5" ry="5"/>
+                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
+                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/>
+            </svg>
+            <span class="link-text">Instagram</span>
+        </a>
+    </div>
+
+    <footer>
+        <p>&copy; 2026 YTGrab. Download YouTube videos & audio free & fast.</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+
+</html>
