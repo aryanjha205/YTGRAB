@@ -23,6 +23,7 @@ COBALT_API_TOKEN = os.getenv("COBALT_API_TOKEN")
 INVIDIOUS_API_URL = os.getenv(
     "INVIDIOUS_API_URL", "https://yewtu.be"
 ).rstrip("/")
+PIPED_API_URL = os.getenv("PIPED_API_URL", "https://pipedapi.kavin.rocks").rstrip("/")
 REQUEST_TIMEOUT = (5, 30)
 
 # --- PWA Static Files Serving ---
@@ -215,6 +216,53 @@ def extract_youtube_with_invidious(url):
         logger.warning("Invidious fallback failed: %s", error)
     return None, "Invidious extraction failed"
 
+
+def extract_youtube_with_piped(url):
+    """Keyless fallback using the public Piped streams API."""
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        return None, "Invalid YouTube URL"
+    try:
+        response = requests.get(f"{PIPED_API_URL}/streams/{video_id}", timeout=REQUEST_TIMEOUT)
+        if not response.ok:
+            return None, f"Piped returned HTTP {response.status_code}"
+        data = response.json()
+        title = data.get("title", f"YouTube Video {video_id}")
+        thumbnail = data.get("thumbnailUrl") or f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+        media = []
+
+        for stream in data.get("videoStreams", []):
+            stream_url = stream.get("url")
+            if not stream_url or not stream.get("videoOnly", False):
+                # Prefer muxed streams so the downloaded video includes audio.
+                if not stream_url or stream.get("videoOnly", False):
+                    continue
+            quality = stream.get("quality", "video")
+            ext = (stream.get("format") or "mp4").lower()
+            filename = f"{title}_{quality}.{ext}"
+            media.append({"filename": filename, "size": "Video", "thumbnail": thumbnail,
+                          "dlink": stream_url, "stream_url": f"/api/stream?url={quote_plus(stream_url)}",
+                          "proxy_download": f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
+                          "type": "video", "quality": f"Video ({quality})"})
+            break
+
+        for stream in data.get("audioStreams", []):
+            stream_url = stream.get("url")
+            if not stream_url:
+                continue
+            ext = (stream.get("format") or "m4a").lower()
+            filename = f"{title}_audio.{ext}"
+            media.append({"filename": filename, "size": "Audio Only", "thumbnail": thumbnail,
+                          "dlink": stream_url, "stream_url": None,
+                          "proxy_download": f"/api/download?url={quote_plus(stream_url)}&filename={quote_plus(filename)}",
+                          "type": "audio", "quality": f"Audio ({ext.upper()})"})
+            break
+
+        return ({"media": media, "title": title, "source": "piped"}, None) if media else (None, "Piped returned no streams")
+    except (requests.RequestException, ValueError) as error:
+        logger.warning("Piped fallback failed: %s", error)
+        return None, "Piped extraction failed"
+
 def extract_youtube_data(url):
     """Extract YouTube video with fallback strategy."""
     # Ask the primary first, then use the fallback to fill any missing media
@@ -231,9 +279,9 @@ def extract_youtube_data(url):
             return primary, None
 
     try:
-        fallback, fallback_error = extract_youtube_with_invidious(url)
+        fallback, fallback_error = extract_youtube_with_piped(url)
     except Exception as error:
-        logger.warning("Invidious provider error: %s", error)
+        logger.warning("Piped provider error: %s", error)
         fallback, fallback_error = None, str(error)
     if fallback:
         if not primary:
@@ -243,12 +291,12 @@ def extract_youtube_data(url):
             item for item in fallback.get("media", []) if item.get("type") not in existing_types
         )
         if primary.get("media"):
-            primary["source"] = "cobalt+invidious"
+            primary["source"] = "cobalt+piped"
             return primary, None
 
     detail = primary_error or fallback_error
     logger.warning("All YouTube providers failed: %s", detail)
-    return None, "Unable to download video or audio from YouTube. Try another video link or check back later."
+    return None, f"Unable to download video or audio from YouTube. Providers unavailable ({detail})."
 
 
 def is_safe_remote_url(value):
